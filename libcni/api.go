@@ -15,6 +15,8 @@
 package libcni
 
 import (
+	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -91,6 +93,37 @@ type CNIConfig struct {
 	Path     []string
 	exec     invoke.Exec
 	cacheDir string
+}
+
+type errWrap struct {
+	errors *list.List
+}
+
+func (ew *errWrap) isNil() bool {
+	if ew.errors == nil {
+		return true
+	}
+	return false
+}
+
+func (ew *errWrap) Error() string {
+	if ew.errors == nil {
+		return ""
+	}
+	var buf = &bytes.Buffer{}
+	for ele := ew.errors.Front(); ele != nil; ele = ele.Next() {
+		if err, ok := ele.Value.(error); ok {
+			buf.WriteString(err.Error())
+		}
+	}
+	return buf.String()
+}
+
+func (ew *errWrap) addError(err error) {
+	if ew.errors == nil {
+		ew.errors = list.New()
+	}
+	ew.errors.PushBack(err)
 }
 
 // CNIConfig implements the CNI interface
@@ -498,7 +531,10 @@ func (c *CNIConfig) delNetwork(ctx context.Context, name, cniVersion string, net
 
 // DelNetworkList executes a sequence of plugins with the DEL command
 func (c *CNIConfig) DelNetworkList(ctx context.Context, list *NetworkConfigList, rt *RuntimeConf) error {
-	var cachedResult types.Result
+	var (
+		errs         = &errWrap{}
+		cachedResult types.Result
+	)
 
 	// Cached result on DEL was added in CNI spec version 0.4.0 and higher
 	if gtet, err := version.GreaterThanOrEqualTo(list.CNIVersion, "0.4.0"); err != nil {
@@ -513,12 +549,15 @@ func (c *CNIConfig) DelNetworkList(ctx context.Context, list *NetworkConfigList,
 	for i := len(list.Plugins) - 1; i >= 0; i-- {
 		net := list.Plugins[i]
 		if err := c.delNetwork(ctx, list.Name, list.CNIVersion, net, cachedResult, rt); err != nil {
-			return err
+			errs.addError(err)
 		}
 	}
 	_ = c.cacheDel(list.Name, rt)
 
-	return nil
+	if errs.isNil() {
+		return nil
+	}
+	return errs
 }
 
 // AddNetwork executes the plugin with the ADD command
